@@ -8,9 +8,9 @@ st.set_page_config(page_title="Unificador de PDFs", layout="centered")
 st.title("🧩 Unificar PDFs (sin límite de páginas)")
 st.caption("Sube varios PDFs con cualquier cantidad de páginas y genera un único archivo combinado.")
 
-# Import dentro de try para mostrar errores claros si algo falla al arrancar
 try:
-    from pypdf import PdfReader, PdfMerger
+    from pypdf import PdfReader
+    from pypdf.merger import PdfMerger
 except Exception as e:
     st.error("No se pudo importar pypdf. Verifica la versión en requirements.txt.")
     st.exception(e)
@@ -20,7 +20,6 @@ except Exception as e:
 orden = st.selectbox("Orden de unión", ["Orden de subida", "Nombre de archivo (A→Z)"])
 st.divider()
 
-# ---------- Carga de archivos ----------
 files = st.file_uploader(
     "Selecciona tus PDFs",
     type=["pdf"],
@@ -29,18 +28,14 @@ files = st.file_uploader(
 )
 
 def contar_paginas(file) -> int:
-    """Devuelve el número de páginas; intenta abrir en modo laxo si está 'owner-encrypted'."""
     file.seek(0)
     reader = PdfReader(file, strict=False)
-    # Si está cifrado con contraseña de usuario, lanzará error al acceder a pages
     return len(reader.pages)
 
 def unir_con_merger(archivos) -> BytesIO:
-    """Une PDFs con PdfMerger (pypdf 6), desactiva importación de marcadores para evitar bugs."""
     merger = PdfMerger(strict=False)
     for f in archivos:
         f.seek(0)
-        # import_bookmarks=False evita errores por outlines corruptos
         merger.append(f, import_bookmarks=False)
     out = BytesIO()
     merger.write(out)
@@ -55,22 +50,19 @@ if files:
     st.subheader("📄 Archivos detectados")
     total_pag = 0
     legibles = True
-
     for f in files:
         try:
             n = contar_paginas(f)
             total_pag += n
             st.write(f"• **{f.name}** — {n} pág.")
         except Exception as e:
-            st.error(f"❌ No se pudo leer **{f.name}** (posible PDF protegido o corrupto).")
-            with st.expander(f"Ver detalle de error de {f.name}"):
+            st.error(f"❌ No se pudo leer **{f.name}**")
+            with st.expander(f"Detalle de {f.name}"):
                 st.exception(e)
             legibles = False
 
     st.divider()
-    unir = st.button("🔗 Unir PDFs", use_container_width=True, disabled=(not legibles))
-
-    if unir and legibles:
+    if st.button("🔗 Unir PDFs", use_container_width=True, disabled=(not legibles)):
         try:
             combinado = unir_con_merger(files)
             st.success("✅ PDF combinado generado correctamente.")
@@ -90,5 +82,6 @@ if files:
             st.exception(e)
 else:
     st.info("Sube uno o más archivos PDF para comenzar.")
+
 
 
