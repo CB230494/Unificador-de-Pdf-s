@@ -7,7 +7,7 @@ from typing import List, Tuple
 
 st.set_page_config(page_title="Unificador de PDFs grandes", layout="centered")
 st.title("🧩 Unificar PDFs grandes (ultra ahorro de memoria)")
-st.caption("Agrega cada PDF por separado. Se fusiona al vuelo en disco y se libera memoria de inmediato.")
+st.caption("Agrega cada PDF por separado. Se fusiona al vuelo en disco y se libera RAM de inmediato.")
 
 # -------- Dependencias --------
 try:
@@ -25,7 +25,7 @@ def fs_free_mb(path: str = ".") -> float:
         return 0.0
 
 def save_uploaded_to_disk(uf) -> str:
-    """Vuelca un UploadedFile a disco por chunks (sin ocupar toda la RAM)."""
+    """Vuelca un UploadedFile a disco por chunks (no ocupa toda la RAM)."""
     suffix = os.path.splitext(uf.name)[1].lower() or ".pdf"
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
     uf.seek(0)
@@ -42,11 +42,11 @@ def pretty_size(path: str) -> str:
     return f"{mb:.1f} MB"
 
 def merge_two(a_path: str, b_path: str) -> str:
-    """Une exactamente dos PDFs en disco, manteniendo 2 abiertos a la vez."""
+    """Une exactamente dos PDFs en disco, manteniendo sólo 2 abiertos a la vez."""
     out = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf"); out.close()
     with pikepdf.open(a_path) as dst, pikepdf.open(b_path) as src:
         dst.pages.extend(src.pages)
-        # Guardar 'tal cual' (sin recomprimir/linearizar) -> menos RAM/CPU
+        # Guardar sin recomprimir/linearizar -> menos RAM/CPU
         dst.save(out.name)
     gc.collect()
     return out.name
@@ -100,8 +100,8 @@ if "part_paths" not in st.session_state: st.session_state.part_paths = []     # 
 st.caption(f"🔧 Límite por archivo: {st.get_option('server.maxUploadSize')} MB")
 st.info(f"💾 Espacio libre aprox. en disco temporal: **{fs_free_mb():.0f} MB**")
 
-# ============ 1) Agregar PDFs (uno por vez, fusiones al vuelo) ============
-st.markdown("### 1) Agregar y fusionar al vuelo")
+# ============ 1) Agregar PDFs (uno por vez, fusión al vuelo) ============
+st.markdown("### 1) Agregar y fusionar al vuelo (el orden es el que agregues)")
 uploader = st.file_uploader("Selecciona un PDF y pulsa **Agregar**", type=["pdf"], accept_multiple_files=False)
 
 col1, col2, col3 = st.columns([1,1,1])
@@ -113,7 +113,6 @@ with col3:
     borrar_partes = st.button("🧹 Borrar partes generadas", disabled=(len(st.session_state.part_paths)==0), use_container_width=True)
 
 if reset:
-    # Borra todo (acumulado + partes)
     try:
         if st.session_state.accum_path and os.path.exists(st.session_state.accum_path):
             os.remove(st.session_state.accum_path)
@@ -141,7 +140,6 @@ if add and uploader is not None:
     try:
         new_path = save_uploaded_to_disk(uploader)  # derrama a disco
         if st.session_state.accum_path is None:
-            # primer archivo => pasa a ser el acumulado
             st.session_state.accum_path = new_path
         else:
             # fusionar acumulado + nuevo -> nuevo acumulado
@@ -181,9 +179,8 @@ if st.session_state.accum_path and os.path.exists(st.session_state.accum_path):
     size_mb = os.path.getsize(st.session_state.accum_path) / (1024 * 1024)
     st.caption(f"Tamaño actual: **{size_mb:.1f} MB**")
 
-    BIG_THRESHOLD = 300  # umbral para ocultar descarga completa si es muy grande
+    BIG_THRESHOLD = 300  # oculta descarga completa si es muy grande
 
-    # Descarga completa (solo si no es gigantesco)
     if size_mb <= BIG_THRESHOLD:
         with open(st.session_state.accum_path, "rb") as fh:
             st.download_button("⬇️ Descargar PDF completo",
@@ -201,8 +198,13 @@ if st.session_state.accum_path and os.path.exists(st.session_state.accum_path):
     if gen_parts:
         try:
             prog = st.progress(0.0)
-            parts = split_file(st.session_state.accum_path, part_mb, prog_cb=prog.progress)
-            st.session_state.part_paths = parts
+            # Si ya había partes, bórralas primero
+            for p in st.session_state.part_paths:
+                try:
+                    if os.path.exists(p): os.remove(p)
+                except Exception:
+                    pass
+            st.session_state.part_paths = split_file(st.session_state.accum_path, part_mb, prog_cb=prog.progress)
 
             # Una vez creadas TODAS las partes, borra el original para liberar espacio
             try:
@@ -215,14 +217,33 @@ if st.session_state.accum_path and os.path.exists(st.session_state.accum_path):
         except Exception as e:
             st.error("Error al generar partes."); st.exception(e)
 
-# Mostrar botones de descarga de partes si existen
+# ---- Descarga de partes (una por vez, con clave única) ----
 if st.session_state.part_paths:
     st.markdown("#### ⬇️ Descarga tus partes")
+    # Mostrar tamaños informativos
     for i, p in enumerate(st.session_state.part_paths, 1):
-        with open(p, "rb") as fh:
-            st.download_button(f"Parte {i:02d}/{len(st.session_state.part_paths)}",
-                               data=fh, file_name=f"unificado.pdf.part{i:02d}",
-                               mime="application/octet-stream", use_container_width=True)
+        tam = os.path.getsize(p) / (1024 * 1024)
+        st.write(f"Parte {i:02d}/{len(st.session_state.part_paths)} — ~{tam:.1f} MB")
+
+    idx = st.number_input(
+        "Elige qué parte descargar",
+        min_value=1,
+        max_value=len(st.session_state.part_paths),
+        value=1,
+        step=1,
+        help="Descarga una parte, luego cambia el número para la siguiente."
+    )
+    sel_path = st.session_state.part_paths[idx - 1]
+    # Enviar file-like (no cargamos toda la parte en RAM)
+    with open(sel_path, "rb") as fh:
+        st.download_button(
+            f"⬇️ Descargar parte seleccionada ({idx:02d}/{len(st.session_state.part_paths)})",
+            data=fh,
+            file_name=f"unificado.pdf.part{idx:02d}",
+            mime="application/octet-stream",
+            key=f"dl_part_selected_{idx}",
+            use_container_width=True
+        )
 
     # Scripts y manifest
     bat, sh = make_join_scripts("unificado.pdf", len(st.session_state.part_paths))
@@ -231,15 +252,15 @@ if st.session_state.part_paths:
     with colA:
         st.download_button("🪟 Recombinar (Windows .bat)", data=bat,
                            file_name="recombinar_windows.bat",
-                           mime="application/octet-stream", use_container_width=True)
+                           mime="application/octet-stream", key="dl_bat", use_container_width=True)
     with colB:
         st.download_button("🐧 Recombinar (macOS/Linux .sh)", data=sh,
                            file_name="recombinar_unix.sh",
-                           mime="text/x-shellscript", use_container_width=True)
+                           mime="text/x-shellscript", key="dl_sh", use_container_width=True)
     with colC:
         st.download_button("🧾 Manifest SHA-256", data=manifest,
                            file_name="manifest_sha256.txt", mime="text/plain",
-                           use_container_width=True)
+                           key="dl_manifest", use_container_width=True)
 
 # ============ 3) Limpieza ============
 st.divider()
@@ -255,3 +276,5 @@ if st.button("🧹 Borrar todo y reiniciar", use_container_width=True):
     st.session_state.added_names = []
     st.session_state.part_paths = []
     st.toast("Temporales eliminados.", icon="🧼"); st.rerun()
+
+
