@@ -1,43 +1,52 @@
 # =========================
-# 🧩 Unificador de PDFs grandes — ultra ahorro (pikepdf + disco)
+# 🧩 Unificador de PDFs grandes — ultra ahorro + Supabase link
 # =========================
 import streamlit as st
 import tempfile, os, shutil, gc
 from typing import List
+from uuid import uuid4
 
 st.set_page_config(page_title="Unificador de PDFs", layout="centered")
-st.title("🧩 Unificar PDFs grandes (modo ultra ahorro)")
-st.caption("Optimizado para archivos pesados. Derrama a disco, une incrementalmente y limpia memoria entre pasos.")
+st.title("🧩 Unificar PDFs grandes (ultra ahorro)")
 
-# --------- Dependencias ---------
+# ---------- Dependencias ----------
 try:
     import pikepdf
 except Exception as e:
     st.error("No se pudo importar pikepdf. Revisa requirements.txt.")
-    st.exception(e)
-    st.stop()
+    st.exception(e); st.stop()
 
-# Mostrar límites para verificar config
-st.caption(f"🔧 Límite actual por archivo (MB): {st.get_option('server.maxUploadSize')}")
+# Supabase opcional (para descarga sin usar RAM del servidor)
+SB = None; SB_BUCKET = None
+usar_supabase = st.toggle("Subir resultado a Supabase (recomendado >200 MB)", value=True)
+if usar_supabase:
+    try:
+        from supabase import create_client
+        sb_secrets = st.secrets.get("supabase", {})
+        SB = create_client(sb_secrets["url"], sb_secrets["key"])
+        SB_BUCKET = sb_secrets.get("bucket", "pdf-unificados")  # crea este bucket en tu proyecto
+    except Exception:
+        SB = None
+        st.warning("No hay credenciales de Supabase en secrets. Se usará descarga directa (puede fallar con archivos muy grandes).")
 
-# --------- Opciones ---------
+st.caption(f"🔧 Límite actual por archivo: {st.get_option('server.maxUploadSize')} MB")
+st.divider()
+
+# ---------- Opciones ----------
 c1, c2 = st.columns(2)
 with c1:
     ordenar = st.selectbox("Orden", ["Orden de subida", "Nombre de archivo (A→Z)"])
 with c2:
-    conteo_paginas = st.toggle("Contar páginas (más consumo)", value=False)
+    contar_paginas = st.toggle("Contar páginas (consume más)", value=False)
 
-st.divider()
-
-# --------- Subida ---------
+# ---------- Subida ----------
 files = st.file_uploader("Selecciona tus PDFs", type=["pdf"], accept_multiple_files=True)
 
 # ===== Utilidades =====
 def to_disk(uploaded_files) -> List[str]:
-    """Vuelca los UploadedFile a disco por chunks para no ocupar RAM."""
+    """Vuelca UploadedFile a disco por chunks (sin ocupar mucha RAM)."""
     paths = []
-    if not uploaded_files:
-        return paths
+    if not uploaded_files: return paths
     prog = st.progress(0.0)
     for i, uf in enumerate(uploaded_files, 1):
         suffix = os.path.splitext(uf.name)[1].lower() or ".pdf"
@@ -45,66 +54,30 @@ def to_disk(uploaded_files) -> List[str]:
         uf.seek(0)
         while True:
             chunk = uf.read(8 * 1024 * 1024)  # 8MB
-            if not chunk:
-                break
+            if not chunk: break
             tmp.write(chunk)
         tmp.flush(); tmp.close()
         paths.append(tmp.name)
         prog.progress(i / len(uploaded_files))
     return paths
 
-def list_files(paths: List[str]) -> None:
-    for p in paths:
-        nm = os.path.basename(p)
-        try:
-            size_mb = os.path.getsize(p) / (1024 * 1024)
-        except Exception:
-            size_mb = 0
-        st.write(f"• **{nm}** — {size_mb:.1f} MB")
-
-def free_space_mb(path: str) -> float:
-    """Espacio libre aproximado en el FS del archivo."""
-    try:
-        stat = os.statvfs(os.path.dirname(path) or ".")
-        return (stat.f_bavail * stat.f_frsize) / (1024 * 1024)
-    except Exception:
-        return 0.0
-
-def estimate_needed_mb(paths: List[str]) -> float:
-    """Estimación muy conservadora del pico de disco requerido."""
-    sizes = [os.path.getsize(p) / (1024 * 1024) for p in paths]
-    if not sizes:
-        return 0.0
-    # pico ≈ suma_actual + archivo_siguiente + margen
-    return sum(sizes) + max(sizes, default=0) + 200.0  # +200MB de colchón
-
 def merge_incremental(paths: List[str]) -> str:
-    """Une N PDFs creando solo 1 intermedio por paso (máximo 2 PDFs abiertos)."""
-    assert len(paths) >= 1
+    """Une N PDFs creando un intermedio por paso (máx. 2 abiertos a la vez)."""
     base = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf"); base.close()
     shutil.copyfile(paths[0], base.name)
     current = base.name
-
-    for idx, path in enumerate(paths[1:], start=2):
+    for path in paths[1:]:
         nxt = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf"); nxt.close()
-        # Abrimos base + siguiente; NO recomprimir ni linearizar (menos RAM/CPU)
         with pikepdf.open(current) as dst, pikepdf.open(path) as src:
             dst.pages.extend(src.pages)
-            dst.save(nxt.name)  # guardar tal cual, sin re-empaquetar streams
-
-        try:
-            os.remove(current)
-        except Exception:
-            pass
+            dst.save(nxt.name)  # sin recomprimir/linearizar -> menos RAM/CPU
+        try: os.remove(current)
+        except Exception: pass
         current = nxt.name
-        # Limpieza agresiva
         gc.collect()
-        st.caption(f"Paso {idx-1}/{len(paths)-1} listo…")
-
-    return current
+    return current  # ruta final
 
 def merge_two(a_path: str, b_path: str) -> str:
-    """Une exactamente dos PDFs en el disco, versión mínima."""
     out = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf"); out.close()
     with pikepdf.open(a_path) as dst, pikepdf.open(b_path) as src:
         dst.pages.extend(src.pages)
@@ -112,13 +85,30 @@ def merge_two(a_path: str, b_path: str) -> str:
     gc.collect()
     return out.name
 
-# --------- Estado ---------
-if "disk_paths" not in st.session_state:
-    st.session_state.disk_paths = None
-if "names" not in st.session_state:
-    st.session_state.names = None
+def show_files(paths: List[str]):
+    for p in paths:
+        nm = os.path.basename(p)
+        size_mb = os.path.getsize(p) / (1024 * 1024)
+        st.write(f"• **{nm}** — {size_mb:.1f} MB")
 
-# --------- Preparar (volcar a disco) ---------
+def upload_to_supabase(path_local: str) -> str:
+    """Sube a Supabase Storage y devuelve URL firmada (24h)."""
+    assert SB is not None and SB_BUCKET is not None
+    key = f"salidas/{uuid4().hex}.pdf"
+    with open(path_local, "rb") as fh:
+        # upsert=True para sobrescribir si existiera
+        SB.storage.from_(SB_BUCKET).upload(key, fh, file_options={"contentType": "application/pdf", "upsert": True})
+    signed = SB.storage.from_(SB_BUCKET).create_signed_url(key, 60 * 60 * 24)
+    # compat: dict o objeto con atributo
+    if isinstance(signed, dict):
+        return signed.get("signed_url") or signed.get("url") or ""
+    return getattr(signed, "signed_url", "") or str(signed)
+
+# ===== Estado =====
+if "disk_paths" not in st.session_state: st.session_state.disk_paths = None
+if "names" not in st.session_state: st.session_state.names = None
+
+# Paso 1: preparar (volcar a disco)
 prep = st.button("📦 Preparar archivos (volcar a disco)", disabled=not files, use_container_width=True)
 if prep and files:
     try:
@@ -130,16 +120,14 @@ if prep and files:
         st.toast("Listo: archivos en disco. Reiniciando para liberar memoria…", icon="✅")
         st.rerun()
     except Exception as e:
-        st.error("Error preparando archivos.")
-        st.exception(e)
+        st.error("Error preparando archivos."); st.exception(e)
 
-# --------- Mostrar y unir ---------
+# Paso 2: unir
 if st.session_state.disk_paths:
     st.subheader("📄 Archivos listos")
-    list_files(st.session_state.disk_paths)
+    show_files(st.session_state.disk_paths)
 
-    # (Opcional) conteo
-    if conteo_paginas:
+    if contar_paginas:
         try:
             total_pag = 0
             for p in st.session_state.disk_paths:
@@ -147,70 +135,61 @@ if st.session_state.disk_paths:
                     total_pag += len(pdf.pages)
             st.caption(f"Páginas totales (aprox.): {total_pag}")
         except Exception as e:
-            st.warning("No se pudieron contar páginas.")
-            st.exception(e)
-
-    # Chequeo de espacio libre
-    probe = st.session_state.disk_paths[0]
-    fs_free = free_space_mb(probe)
-    need = estimate_needed_mb(st.session_state.disk_paths)
-    if fs_free and fs_free < need:
-        st.warning(f"Espacio libre aprox.: {fs_free:.0f} MB < estimado necesario {need:.0f} MB. "
-                   "Podría fallar al guardar. Prueba el modo 2+2 o une en dos tandas.")
+            st.warning("No se pudieron contar páginas."); st.exception(e)
 
     st.divider()
 
-    # Botón principal
-    if st.button("🔗 Unir todo (incremental, muy bajo consumo)", use_container_width=True):
-        try:
-            out_path = merge_incremental(st.session_state.disk_paths)
-            st.success("✅ PDF combinado generado.")
-            with open(out_path, "rb") as fh:
-                st.download_button("⬇️ Descargar PDF Unificado", data=fh, file_name="unificado.pdf",
-                                   mime="application/pdf", use_container_width=True)
-        except Exception as e:
-            st.error("❌ Error al unir (incremental).")
-            st.exception(e)
+    colA, colB = st.columns(2)
+    with colA:
+        unir_btn = st.button("🔗 Unir todo (incremental)", use_container_width=True)
+    with colB:
+        b22_btn = st.button("🪫 Plan B: 2+2→1", use_container_width=True,
+                            disabled=len(st.session_state.disk_paths) != 4)
 
-    # Plan B: 2+2→1 (útil con 4 archivos grandes)
-    if len(st.session_state.disk_paths) == 4:
-        st.divider()
-        if st.button("🪫 Plan B: unir 2+2 y luego unir resultados", use_container_width=True):
+    def _finalizar(out_path: str):
+        st.success("✅ PDF combinado generado.")
+        if usar_supabase and SB is not None:
             try:
-                a1, a2, b1, b2 = st.session_state.disk_paths
-                # primer par
-                pA = merge_two(a1, a2)
-                # segundo par
-                pB = merge_two(b1, b2)
-                # final
-                out_path = merge_two(pA, pB)
-                # limpiar intermedios
-                for p in [pA, pB]:
-                    try: os.remove(p)
-                    except Exception: pass
-
-                st.success("✅ PDF final generado (2+2→1).")
-                with open(out_path, "rb") as fh:
-                    st.download_button("⬇️ Descargar PDF Unificado (2+2)", data=fh,
-                                       file_name="unificado.pdf", mime="application/pdf",
-                                       use_container_width=True)
+                url = upload_to_supabase(out_path)
+                if url:
+                    st.link_button("⬇️ Descargar desde Supabase (recomendado)", url, use_container_width=True)
+                    st.caption("Enlace firmado válido 24 h.")
+                    return
             except Exception as e:
-                st.error("❌ Error en modo 2+2.")
-                st.exception(e)
+                st.warning("Falló la subida a Supabase, se intentará descarga directa."); st.exception(e)
 
-    # Limpieza
+        # Fallback: descarga directa (puede consumir RAM con archivos muy grandes)
+        with open(out_path, "rb") as fh:
+            st.download_button("⬇️ Descargar PDF Unificado (directo)", data=fh,
+                               file_name="unificado.pdf", mime="application/pdf",
+                               use_container_width=True)
+
+    try:
+        if unir_btn:
+            out_path = merge_incremental(st.session_state.disk_paths)
+            _finalizar(out_path)
+
+        if b22_btn:
+            a1, a2, b1, b2 = st.session_state.disk_paths
+            pA = merge_two(a1, a2)
+            pB = merge_two(b1, b2)
+            out_path = merge_two(pA, pB)
+            try: os.remove(pA); os.remove(pB)
+            except Exception: pass
+            _finalizar(out_path)
+
+    except Exception as e:
+        st.error("❌ Error al unir."); st.exception(e)
+
     st.divider()
     if st.button("🧹 Borrar temporales y reiniciar", use_container_width=True):
         try:
             for p in st.session_state.disk_paths:
-                if os.path.exists(p):
-                    os.remove(p)
-        except Exception:
-            pass
-        st.session_state.disk_paths = None
-        st.session_state.names = None
-        st.toast("Temporales eliminados.", icon="🧼")
-        st.rerun()
+                if os.path.exists(p): os.remove(p)
+        except Exception: pass
+        st.session_state.disk_paths = None; st.session_state.names = None
+        st.toast("Temporales eliminados.", icon="🧼"); st.rerun()
 else:
     st.info("Sube y pulsa **Preparar archivos** para volcarlos a disco antes de unir.")
+
 
