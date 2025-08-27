@@ -1,4 +1,4 @@
 streamlit==1.49.0
-# Fijamos pypdf en una rama estable y compatible
-pypdf==5.1.0
+pypdf==6.0.0
+
 
