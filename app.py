@@ -1,5 +1,5 @@
 # =========================
-# 🧩 Unificador de PDFs — compatible con pypdf 6
+# 🧩 Unificador de PDFs — pypdf 6.0.0
 # =========================
 import streamlit as st
 from io import BytesIO
@@ -8,11 +8,11 @@ st.set_page_config(page_title="Unificador de PDFs", layout="centered")
 st.title("🧩 Unificar PDFs (sin límite de páginas)")
 st.caption("Sube varios PDFs con cualquier cantidad de páginas y genera un único archivo combinado.")
 
+# Importaciones correctas para pypdf 6.0.0
 try:
-    from pypdf import PdfReader
-    from pypdf.merger import PdfMerger
+    from pypdf import PdfReader, PdfMerger
 except Exception as e:
-    st.error("No se pudo importar pypdf. Verifica la versión en requirements.txt.")
+    st.error("❌ Error al importar pypdf.")
     st.exception(e)
     st.stop()
 
@@ -32,7 +32,7 @@ def contar_paginas(file) -> int:
     reader = PdfReader(file, strict=False)
     return len(reader.pages)
 
-def unir_con_merger(archivos) -> BytesIO:
+def unir_pdfs(archivos) -> BytesIO:
     merger = PdfMerger(strict=False)
     for f in archivos:
         f.seek(0)
@@ -57,14 +57,13 @@ if files:
             st.write(f"• **{f.name}** — {n} pág.")
         except Exception as e:
             st.error(f"❌ No se pudo leer **{f.name}**")
-            with st.expander(f"Detalle de {f.name}"):
-                st.exception(e)
+            st.exception(e)
             legibles = False
 
     st.divider()
     if st.button("🔗 Unir PDFs", use_container_width=True, disabled=(not legibles)):
         try:
-            combinado = unir_con_merger(files)
+            combinado = unir_pdfs(files)
             st.success("✅ PDF combinado generado correctamente.")
             st.download_button(
                 "⬇️ Descargar PDF Unificado",
@@ -76,12 +75,9 @@ if files:
             with st.expander("📋 Resumen"):
                 st.write(f"Archivos unidos: **{len(files)}**")
                 st.write(f"Páginas totales: **{total_pag}**")
-                st.write("Orden: **{}**".format("Nombre (A→Z)" if orden != "Orden de subida" else "Orden de subida"))
+                st.write("Orden aplicado: **{}**".format("Nombre (A→Z)" if orden != "Orden de subida" else "Orden de subida"))
         except Exception as e:
             st.error("❌ Ocurrió un error al unir.")
             st.exception(e)
 else:
     st.info("Sube uno o más archivos PDF para comenzar.")
-
-
-
